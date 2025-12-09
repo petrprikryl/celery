@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from celery.app.base import Celery
     from celery.app.task import Task
+    from celery.worker import WorkController
 
     class DjangoDBModule(Protocol):
         connections: ConnectionHandler
@@ -65,6 +66,8 @@ def fixup(app: "Celery", env: str = 'DJANGO_SETTINGS_MODULE') -> Optional["Djang
 class DjangoFixup:
     """Fixup installed when using Django."""
 
+    worker: "WorkController" = None
+
     def __init__(self, app: "Celery"):
         self.app = app
         if _state.default_app is None:
@@ -90,7 +93,7 @@ class DjangoFixup:
     @property
     def worker_fixup(self) -> "DjangoWorkerFixup":
         if self._worker_fixup is None:
-            self._worker_fixup = DjangoWorkerFixup(self.app)
+            self._worker_fixup = DjangoWorkerFixup(self.app, self.worker)
         return self._worker_fixup
 
     @worker_fixup.setter
@@ -102,6 +105,8 @@ class DjangoFixup:
         self.worker_fixup.validate_models()
 
     def on_worker_init(self, **kwargs: Any) -> None:
+        self.worker = kwargs.get("sender")
+        self.worker_fixup = DjangoWorkerFixup(self.app, self.worker)
         self.worker_fixup.install()
 
     def now(self, utc: bool = False) -> datetime:
@@ -119,9 +124,9 @@ class DjangoFixup:
 class DjangoWorkerFixup:
     _db_recycles = 0
 
-    def __init__(self, app: "Celery") -> None:
+    def __init__(self, app: "Celery", worker: "WorkController") -> None:
         self.app = app
-        self.db_reuse_max = self.app.conf.get('CELERY_DB_REUSE_MAX', None)
+        self.worker = worker
         self._db = cast("DjangoDBModule", import_module('django.db'))
         self._cache = import_module('django.core.cache')
         self._settings = symbol_by_name('django.conf:settings')
@@ -205,7 +210,7 @@ class DjangoWorkerFixup:
             # Support Django < 4.1
             connections = self._db.connections.all()
 
-        is_prefork = self.app.conf.get('worker_pool', 'prefork') == "prefork"
+        is_prefork = "prefork" in self.worker.pool_cls.__module__
 
         for conn in connections:
             try:
